@@ -47,6 +47,7 @@
 #include "bsp_btn_ble.h"
 #include "nrf_drv_saadc.h"
 #include "nrf_drv_timer.h"
+#include "ble_sensor_data_custom.h"
 
 
 #define IS_SRVC_CHANGED_CHARACT_PRESENT 0                                           /**< Include the service_changed characteristic. If not enabled, the server's database cannot be changed for the lifetime of the device. */
@@ -71,26 +72,14 @@
 #define NEXT_CONN_PARAMS_UPDATE_DELAY   APP_TIMER_TICKS(30000, APP_TIMER_PRESCALER) /**< Time between each call to sd_ble_gap_conn_param_update after the first call (30 seconds). */
 #define MAX_CONN_PARAMS_UPDATE_COUNT    3                                           /**< Number of attempts before giving up the connection parameter negotiation. */
 
-#define START_STRING                    "Start...\n"                                /**< The string that will be sent over the UART when the application starts. */
-
 #define DEAD_BEEF                       0xDEADBEEF                                  /**< Value used as error code on stack dump, can be used to identify stack location on stack unwind. */
 
 #define UART_TX_BUF_SIZE                256                                         /**< UART TX buffer size. */
 #define UART_RX_BUF_SIZE                256                                         /**< UART RX buffer size. */
-        
 
-static ble_nus_t                        m_nus;                                      /**< Structure to identify the Nordic UART Service. */
+static ble_sdc_t                        m_sdc;
 static uint16_t                         m_conn_handle = BLE_CONN_HANDLE_INVALID;    /**< Handle of the current connection. */
-
 static ble_uuid_t                       m_adv_uuids[] = {{BLE_UUID_NUS_SERVICE, NUS_SERVICE_UUID_TYPE}};  /**< Universally unique service identifier. */
-static nrf_saadc_value_t                adc_buf;
-static uint32_t                         m_adc_evt_counter;
-volatile uint8_t                        state = 1;
-static const nrf_drv_timer_t            m_timer = NRF_DRV_TIMER_INSTANCE(1);
-static nrf_ppi_channel_t                m_ppi_channel;
-
-void saadc_sampling_event_disable(void);
-void saadc_sampling_event_enable(void);
 
 /**@brief Function for assert macro callback.
  *
@@ -138,48 +127,23 @@ static void gap_params_init(void)
     APP_ERROR_CHECK(err_code);
 }
 
-
-/**@brief Function for handling the data from the Nordic UART Service.
- *
- * @details This function will process the data received from the Nordic UART BLE Service and send
- *          it to the UART module.
- *
- * @param[in] p_nus    Nordic UART Service structure.
- * @param[in] p_data   Data to be send to UART module.
- * @param[in] length   Length of the data.
- */
-/**@snippet [Handling the data received over BLE] */
-static void nus_data_handler(ble_nus_t * p_nus, uint8_t * p_data, uint16_t length)
+static void sdc_data_handler(ble_sdc_t * p_sdc, uint8_t * p_data, uint16_t length)
 {
-    for (uint32_t i = 0; i < length; i++)
-    {
-        while(app_uart_put(p_data[i]) != NRF_SUCCESS);
-    }
-    for (uint32_t i = 0; i< length; i++) { 
-        if (p_data[i] == '4') {nrf_gpio_pin_toggle(LED_4);}
-        else if (p_data[i] == '1') {nrf_gpio_pin_toggle(LED_1);}
-        else if (p_data[i] == '2') {nrf_gpio_pin_toggle(LED_2);}
-        else if (p_data[i] == '3') {nrf_gpio_pin_toggle(LED_3);}
-        else if (p_data[i] == 'a') {nrf_gpio_pins_toggle(LEDS_MASK);}
-    }
-        
-    while(app_uart_put('\n') != NRF_SUCCESS);
+  
 }
-/**@snippet [Handling the data received over BLE] */
-
 
 /**@brief Function for initializing services that will be used by the application.
  */
 static void services_init(void)
 {
     uint32_t       err_code;
-    ble_nus_init_t nus_init;
+    ble_sdc_init_t sdc_init;
     
-    memset(&nus_init, 0, sizeof(nus_init));
+    memset(&sdc_init, 0, sizeof(sdc_init));
 
-    nus_init.data_handler = nus_data_handler;
+    sdc_init.data_handler = sdc_data_handler;
     
-    err_code = ble_nus_init(&m_nus, &nus_init);
+    err_code = ble_sdc_init(&m_sdc, &sdc_init);
     APP_ERROR_CHECK(err_code);
 }
 
@@ -297,14 +261,13 @@ static void on_ble_evt(ble_evt_t * p_ble_evt)
         case BLE_GAP_EVT_CONNECTED:
             err_code = bsp_indication_set(BSP_INDICATE_CONNECTED);
             APP_ERROR_CHECK(err_code);
-            saadc_sampling_event_enable();
             m_conn_handle = p_ble_evt->evt.gap_evt.conn_handle;
+            
             break;
             
         case BLE_GAP_EVT_DISCONNECTED:
             err_code = bsp_indication_set(BSP_INDICATE_IDLE);
             APP_ERROR_CHECK(err_code);
-            saadc_sampling_event_disable();
             m_conn_handle = BLE_CONN_HANDLE_INVALID;
             break;
 
@@ -338,8 +301,8 @@ static void on_ble_evt(ble_evt_t * p_ble_evt)
 static void ble_evt_dispatch(ble_evt_t * p_ble_evt)
 {
     ble_conn_params_on_ble_evt(p_ble_evt);
-    ble_nus_on_ble_evt(&m_nus, p_ble_evt);
     on_ble_evt(p_ble_evt);
+    ble_sdc_on_ble_evt(&m_sdc, p_ble_evt);
     ble_advertising_on_ble_evt(p_ble_evt);
     bsp_btn_ble_on_ble_evt(p_ble_evt);
     
@@ -375,49 +338,8 @@ static void ble_stack_init(void)
 }
 
 
-/**@brief Function for handling events from the BSP module.
- *
- * @param[in]   event   Event generated by button press.
- */
-void bsp_event_handler(bsp_event_t event)
-{
-    uint32_t err_code;
-    switch (event)
-    {
-        case BSP_EVENT_SLEEP:
-            sleep_mode_enter();
-            break;
-
-        case BSP_EVENT_DISCONNECT:
-            err_code = sd_ble_gap_disconnect(m_conn_handle, BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION);
-            if (err_code != NRF_ERROR_INVALID_STATE)
-            {
-                APP_ERROR_CHECK(err_code);
-            }
-            break;
-
-        case BSP_EVENT_WHITELIST_OFF:
-            err_code = ble_advertising_restart_without_whitelist();
-            if (err_code != NRF_ERROR_INVALID_STATE)
-            {
-                APP_ERROR_CHECK(err_code);
-            }
-            break;
-
-        default:
-            break;
-    }
-}
 
 
-/**@brief   Function for handling app_uart events.
- *
- * @details This function will receive a single character from the app_uart module and append it to 
- *          a string. The string will be be sent over BLE when the last character received was a 
- *          'new line' i.e '\n' (hex 0x0D) or if the string has reached a length of 
- *          @ref NUS_MAX_DATA_LENGTH.
- */
-/**@snippet [Handling the data received over UART] */
 void uart_event_handle(app_uart_evt_t * p_event)
 {
     static uint8_t data_array[BLE_NUS_MAX_DATA_LEN];
@@ -432,7 +354,7 @@ void uart_event_handle(app_uart_evt_t * p_event)
 
             if ((data_array[index - 1] == '\n') || (index >= (BLE_NUS_MAX_DATA_LEN)))
             {
-                err_code = ble_nus_string_send(&m_nus, data_array, index);
+                err_code = ble_sdc_data_send(&m_sdc, data_array, index);
                 if (err_code != NRF_ERROR_INVALID_STATE)
                 {
                     APP_ERROR_CHECK(err_code);
@@ -453,13 +375,8 @@ void uart_event_handle(app_uart_evt_t * p_event)
         default:
             break;
     }
+ 
 }
-/**@snippet [Handling the data received over UART] */
-
-
-/**@brief  Function for initializing the UART module.
- */
-/**@snippet [UART Initialization] */
 static void uart_init(void)
 {
     uint32_t                     err_code;
@@ -482,7 +399,6 @@ static void uart_init(void)
                        err_code);
     APP_ERROR_CHECK(err_code);
 }
-/**@snippet [UART Initialization] */
 
 
 /**@brief Function for initializing the Advertising functionality.
@@ -522,155 +438,10 @@ static void power_manage(void)
     APP_ERROR_CHECK(err_code);
 }
 
-void pin_int_handler(nrf_drv_gpiote_pin_t pin, nrf_gpiote_polarity_t action)
-{
-    uint32_t err_code;
-    uint8_t index = 5;
-    uint8_t data_array[5] = {'K','N','A','P','P'};
-    if (action == NRF_GPIOTE_POLARITY_LOTOHI)
-    {
-        nrf_gpio_pin_toggle(LED_1);
-        err_code = ble_nus_string_send(&m_nus, data_array, index);
-    }
-    else if (action == NRF_GPIOTE_POLARITY_HITOLO)
-    {
-        nrf_gpio_pin_toggle(LED_1);
-        err_code = ble_nus_string_send(&m_nus, data_array, index);
-    }
-    else if (action == NRF_GPIOTE_POLARITY_TOGGLE)
-    {
-        nrf_gpio_pin_toggle(LED_1);
-        err_code = ble_nus_string_send(&m_nus, data_array, index);
-    }
-    
-    APP_ERROR_CHECK(err_code);
-}
-
-static void gpiote_init(void)
-{
-    nrf_drv_gpiote_init();
-    nrf_drv_gpiote_in_config_t config = 
-    {                                            
-        .is_watcher = false,                     
-        .hi_accuracy = false,                  
-        .pull = NRF_GPIO_PIN_PULLUP,             
-        .sense = NRF_GPIOTE_POLARITY_HITOLO,
-    };
-    nrf_drv_gpiote_in_init(BSP_BUTTON_0, &config, pin_int_handler);
-    nrf_drv_gpiote_in_event_enable(BSP_BUTTON_0, true);
-    
-    
-
-}
-
-void timer_handler(nrf_timer_event_t event_type, void* p_context)
-{
-
-}
-void saadc_sampling_event_init(void)
-{
-    ret_code_t err_code;
-    err_code = nrf_drv_ppi_init();
-    APP_ERROR_CHECK(err_code);
-    
-    nrf_drv_timer_config_t config = { 
-        .frequency          = NRF_TIMER_FREQ_1MHz,
-        .mode               = NRF_TIMER_MODE_TIMER,
-        .bit_width          = NRF_TIMER_BIT_WIDTH_24,
-        .interrupt_priority = 3,
-        .p_context          = NULL  
-    };
-    
-    err_code = nrf_drv_timer_init(&m_timer, &config, timer_handler);
-    APP_ERROR_CHECK(err_code);
-
-    /* setup m_timer for compare event every 400ms */
-    uint32_t ticks = nrf_drv_timer_ms_to_ticks(&m_timer, 400);
-    nrf_drv_timer_extended_compare(&m_timer, NRF_TIMER_CC_CHANNEL0, ticks, NRF_TIMER_SHORT_COMPARE0_CLEAR_MASK, false);
-    nrf_drv_timer_enable(&m_timer);
-
-    uint32_t timer_compare_event_addr = nrf_drv_timer_compare_event_address_get(&m_timer, NRF_TIMER_CC_CHANNEL0);
-    uint32_t saadc_sample_event_addr = nrf_drv_saadc_task_address_get(NRF_SAADC_TASK_SAMPLE);
-
-    /* setup ppi channel so that timer compare event is triggering sample task in SAADC */
-    err_code = nrf_drv_ppi_channel_alloc(&m_ppi_channel);
-    APP_ERROR_CHECK(err_code);
-    
-    err_code = nrf_drv_ppi_channel_assign(m_ppi_channel, timer_compare_event_addr, saadc_sample_event_addr);
-    APP_ERROR_CHECK(err_code);
-}
-
-void saadc_sampling_event_enable(void)
-{
-    ret_code_t err_code = nrf_drv_ppi_channel_enable(m_ppi_channel);
-    APP_ERROR_CHECK(err_code);
-}
-
-void saadc_sampling_event_disable(void)
-{
-    ret_code_t err_code = nrf_drv_ppi_channel_disable(m_ppi_channel);
-    APP_ERROR_CHECK(err_code);
-}
-
-void saadc_event_handler(nrf_drv_saadc_evt_t const * p_event)
-{
-    if (p_event->type == NRF_DRV_SAADC_EVT_DONE) {
-        uint32_t err_code;
-        uint8_t data_to_send;
-        
-        err_code = nrf_drv_saadc_buffer_convert(p_event->data.done.p_buffer,1);
-        APP_ERROR_CHECK(err_code);
-        data_to_send = p_event->data.done.p_buffer[0];
-        //err_code = ble_nus_string_send(&m_nus, data_to_send, 1);
-        //APP_ERROR_CHECK(err_code);
-
-        printf("%d\r\n", p_event->data.done.p_buffer[0]);
-    }
-}
-
-static void saadc_configure(void)
-{   
-    nrf_saadc_channel_config_t config = {
-        .resistor_p = NRF_SAADC_RESISTOR_DISABLED,         
-        .resistor_n = NRF_SAADC_RESISTOR_DISABLED,         
-        .gain       = NRF_SAADC_GAIN1,                   
-        .reference  = NRF_SAADC_REFERENCE_INTERNAL,        
-        .acq_time   = NRF_SAADC_ACQTIME_40US,              
-        .mode       = NRF_SAADC_MODE_SINGLE_ENDED,         
-        .pin_p      = NRF_SAADC_INPUT_AIN0,                 // P0.02 Inngang SAADC
-        .pin_n      = NRF_SAADC_INPUT_DISABLED
-    };
-    
-    nrf_drv_saadc_config_t config_init = {
-        .resolution = NRF_SAADC_RESOLUTION_8BIT,
-        .oversample = NRF_SAADC_OVERSAMPLE_DISABLED,
-        .interrupt_priority = 3 
-    };
-    ret_code_t err_code = nrf_drv_saadc_init(&config_init, saadc_event_handler);
-    APP_ERROR_CHECK(err_code);
-
-    //nrf_saadc_channel_config_t config = NRF_DRV_SAADC_DEFAULT_CHANNEL_CONFIG_SE(NRF_SAADC_INPUT_VDD);
-    
-    err_code = nrf_drv_saadc_channel_init(0,&config);
-    APP_ERROR_CHECK(err_code);
-
-    err_code = nrf_drv_saadc_buffer_convert(&adc_buf,1);
-    APP_ERROR_CHECK(err_code);
-
-}
-
-/**@brief Application main function.
- */
-
 
 int main(void)
 {
     uint32_t err_code;
-    bool erase_bonds;
-    uint8_t  start_string[] = START_STRING;
-    
-    
-    // Initialize.
     APP_TIMER_INIT(APP_TIMER_PRESCALER, APP_TIMER_OP_QUEUE_SIZE, false);
     uart_init();
     ble_stack_init();
@@ -678,20 +449,10 @@ int main(void)
     services_init();
     advertising_init();
     conn_params_init();
-    gpiote_init();
-    saadc_configure();
-    printf("%s",start_string);
-    saadc_sampling_event_init();
     
-
     err_code = ble_advertising_start(BLE_ADV_MODE_FAST);
     APP_ERROR_CHECK(err_code);
-    
-    
-    
-    NRF_GPIO->DIR = (1 << LED_4) | (1<<LED_1) | (1<<LED_2)| (1<<LED_3);
-    printf("%s",start_string);
-    // Enter main loop.
+
     for (;;)
     {
         power_manage();
@@ -700,6 +461,4 @@ int main(void)
 }
 
 
-/** 
- * @}
- */
+
