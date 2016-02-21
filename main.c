@@ -156,11 +156,13 @@ static void nus_data_handler(ble_nus_t * p_nus, uint8_t * p_data, uint16_t lengt
         while(app_uart_put(p_data[i]) != NRF_SUCCESS);
     }
     for (uint32_t i = 0; i< length; i++) { 
-        if (p_data[i] == '4') {nrf_gpio_pin_toggle(LED_4);}
-        else if (p_data[i] == '1') {nrf_gpio_pin_toggle(LED_1);}
-        else if (p_data[i] == '2') {nrf_gpio_pin_toggle(LED_2);}
-        else if (p_data[i] == '3') {nrf_gpio_pin_toggle(LED_3);}
-        else if (p_data[i] == 'a') {nrf_gpio_pins_toggle(LEDS_MASK);}
+        if (p_data[i] == 'a') {
+            saadc_sampling_event_enable();
+        }
+        else if (p_data[i] == 's'){
+            saadc_sampling_event_disable();
+        }
+        
     }
         
     while(app_uart_put('\n') != NRF_SUCCESS);
@@ -297,15 +299,15 @@ static void on_ble_evt(ble_evt_t * p_ble_evt)
         case BLE_GAP_EVT_CONNECTED:
             err_code = bsp_indication_set(BSP_INDICATE_CONNECTED);
             APP_ERROR_CHECK(err_code);
-            saadc_sampling_event_enable();
             m_conn_handle = p_ble_evt->evt.gap_evt.conn_handle;
+            
             break;
             
         case BLE_GAP_EVT_DISCONNECTED:
             err_code = bsp_indication_set(BSP_INDICATE_IDLE);
             APP_ERROR_CHECK(err_code);
-            saadc_sampling_event_disable();
             m_conn_handle = BLE_CONN_HANDLE_INVALID;
+            saadc_sampling_event_disable();
             break;
 
         case BLE_GAP_EVT_SEC_PARAMS_REQUEST:
@@ -522,7 +524,7 @@ static void power_manage(void)
     APP_ERROR_CHECK(err_code);
 }
 
-void pin_int_handler(nrf_drv_gpiote_pin_t pin, nrf_gpiote_polarity_t action)
+/*void pin_int_handler(nrf_drv_gpiote_pin_t pin, nrf_gpiote_polarity_t action)
 {
     uint32_t err_code;
     uint8_t index = 5;
@@ -544,9 +546,9 @@ void pin_int_handler(nrf_drv_gpiote_pin_t pin, nrf_gpiote_polarity_t action)
     }
     
     APP_ERROR_CHECK(err_code);
-}
+}*/
 
-static void gpiote_init(void)
+/*static void gpiote_init(void)
 {
     nrf_drv_gpiote_init();
     nrf_drv_gpiote_in_config_t config = 
@@ -561,7 +563,7 @@ static void gpiote_init(void)
     
     
 
-}
+}*/
 
 void timer_handler(nrf_timer_event_t event_type, void* p_context)
 {
@@ -577,7 +579,7 @@ void saadc_sampling_event_init(void)
         .frequency          = NRF_TIMER_FREQ_1MHz,
         .mode               = NRF_TIMER_MODE_TIMER,
         .bit_width          = NRF_TIMER_BIT_WIDTH_24,
-        .interrupt_priority = 3,
+        .interrupt_priority = NRF_APP_PRIORITY_LOW,
         .p_context          = NULL  
     };
     
@@ -616,13 +618,14 @@ void saadc_event_handler(nrf_drv_saadc_evt_t const * p_event)
 {
     if (p_event->type == NRF_DRV_SAADC_EVT_DONE) {
         uint32_t err_code;
-        uint8_t data_to_send;
+        uint8_t index = 1;
+        uint8_t data_to_send[1];
         
         err_code = nrf_drv_saadc_buffer_convert(p_event->data.done.p_buffer,1);
         APP_ERROR_CHECK(err_code);
-        data_to_send = p_event->data.done.p_buffer[0];
-        //err_code = ble_nus_string_send(&m_nus, data_to_send, 1);
-        //APP_ERROR_CHECK(err_code);
+        data_to_send[0] = p_event->data.done.p_buffer[0];
+        err_code = ble_nus_string_send(&m_nus, data_to_send, index);
+        APP_ERROR_CHECK(err_code);
 
         printf("%d\r\n", p_event->data.done.p_buffer[0]);
     }
@@ -644,7 +647,7 @@ static void saadc_configure(void)
     nrf_drv_saadc_config_t config_init = {
         .resolution = NRF_SAADC_RESOLUTION_8BIT,
         .oversample = NRF_SAADC_OVERSAMPLE_DISABLED,
-        .interrupt_priority = 3 
+        .interrupt_priority = NRF_APP_PRIORITY_LOW 
     };
     ret_code_t err_code = nrf_drv_saadc_init(&config_init, saadc_event_handler);
     APP_ERROR_CHECK(err_code);
@@ -678,7 +681,7 @@ int main(void)
     services_init();
     advertising_init();
     conn_params_init();
-    gpiote_init();
+    //gpiote_init();
     saadc_configure();
     printf("%s",start_string);
     saadc_sampling_event_init();
@@ -689,8 +692,8 @@ int main(void)
     
     
     
-    NRF_GPIO->DIR = (1 << LED_4) | (1<<LED_1) | (1<<LED_2)| (1<<LED_3);
-    printf("%s",start_string);
+    //NRF_GPIO->DIR = (1 << LED_4) | (1<<LED_1) | (1<<LED_2)| (1<<LED_3);
+    printf("%s","Main");
     // Enter main loop.
     for (;;)
     {
